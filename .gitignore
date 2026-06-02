@@ -1,0 +1,7 @@
+# 作業ツール用の設定（公開不要）
+.claude/
+
+# OS / エディタ
+Thumbs.db
+.DS_Store
+*.tmp

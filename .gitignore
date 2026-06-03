@@ -1,7 +1,12 @@
 # 作業ツール用の設定（公開不要）
 .claude/
+HANDOFF.md
 
 # OS / エディタ
 Thumbs.db
 .DS_Store
 *.tmp
+
+# 内部バックアップ・試聴用（公開不要）
+assets/_orig_sit/
+sounds/

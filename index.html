@@ -16,6 +16,12 @@
     image-rendering:pixelated;}
   #hint{margin-top:12px;font-size:13px;color:#2b6f90;text-align:center;line-height:1.6;}
   b{color:#0f7bb0;}
+  #ctrl{margin-top:10px;display:flex;align-items:center;gap:8px;
+    font-size:14px;color:#1d5d7a;font-weight:bold;
+    background:rgba(255,255,255,.55);padding:6px 14px;border-radius:20px;
+    box-shadow:0 2px 8px rgba(40,130,180,.25);}
+  #vol{width:160px;accent-color:#2b9fd8;cursor:pointer;}
+  #volval{display:inline-block;width:34px;text-align:right;color:#0f7bb0;}
 </style>
 </head>
 <body>
@@ -25,6 +31,12 @@
 <div id="hint">
   移動：<b>矢印 / WASD</b>　爆弾：<b>左クリック</b>　起爆：<b>右クリック</b>　決定：<b>Enter</b>　ポーズ：<b>P</b>
 </div>
+<div id="ctrl">
+  <span>🔊 音量</span>
+  <input id="vol" type="range" min="0" max="100" value="60">
+  <span id="volval">60</span>
+</div>
+
 
 <script>
 (() => {
@@ -33,7 +45,9 @@
 // ===== 定数 =====
 const TILE = 48;
 const COLS = 15, ROWS = 13;
-const BLAST_DUR = 40;          // 爆風の効果時間（フレーム）
+const BLAST_DUR = 16;          // 爆風の効果時間（フレーム）。ブロックに遮られていた敵が、ブロック破壊後の残り爆風でギリギリ死なない値（最速の敵=1.5px/fでも侵入は約17f後）
+const BONUS_BLAST_DUR = 40;    // ボーナス中の爆風は長め（誘爆に次の爆弾を置く余裕を作る）
+const CHAIN_DELAY = 8;         // 誘爆：爆風に触れた爆弾が爆発するまでの遅延（フレーム）。転がるような連鎖に見せる
 const STAGE_LIMIT = 180;       // 各ステージの制限時間（秒）= 3分
 const BONUS_TIME  = 30;        // ボーナスステージの制限時間（秒）
 const BONUS_SPAWN = 0.3;       // ボーナス：ニコおじの湧き間隔（秒）
@@ -43,8 +57,10 @@ const SCORE = {
   niko:      100,    // ノーマルニコおじの破壊
   superNiko: 1000,   // スーパーニコおじ（覚醒）の破壊
   boss:      10000,  // 巨大ニコおじの破壊
-  perSecond: 30,     // ステージクリア時の残り秒数1秒あたり
-  sushi:     100,    // 寿司アイテム
+  perSecond: 100,    // ステージクリア時の残り秒数1秒あたり
+  sushi:     1000,   // 寿司アイテム
+  perLife:   5000,   // ゲームクリア時の残機1つあたり
+  remoteBonus: 500,  // 起爆リモコンを所持中にさらに取得したとき
 };
 const OY = 56;                 // 盤面の上オフセット（HUD領域）
 const BW = COLS * TILE;        // 720
@@ -62,7 +78,8 @@ const IT_FIRE = "fire", IT_BOMB = "bomb", IT_SPEED = "speed", IT_REMOTE = "remot
 // ゲーム状態
 const ST_TITLE="title", ST_READY="ready", ST_PLAY="play", ST_CLEAR="clear",
       ST_DEAD="dead", ST_GAMEOVER="gameover", ST_BOSSINTRO="bossintro",
-      ST_WIN="win", ST_PAUSE="pause";
+      ST_WIN="win", ST_PAUSE="pause", ST_BREAK="break",   // ST_BREAK＝ステージ間の合間画像
+      ST_ITEMINFO="iteminfo";   // タイトル→ステージ1の間のアイテム説明
 
 // ===== 画像読み込み =====
 const IMG = {};
@@ -74,12 +91,12 @@ const sources = {
   enemySit1:"assets/enemy_sit1.png",
   enemySit2:"assets/enemy_sit2.png",
   enemySit3:"assets/enemy_sit3.png",
-  enemySit4:"assets/enemy_sit4.png",
   boss:"assets/boss.png",
   bossFace:"assets/boss_face.png",
   playerFace:"assets/player_face.png",
-  title:"title.png",
+  title:"title2.png",
   end:"end.png",
+  brk:"break2.png",
   itemFire:"assets/item_fire.png",
   itemBomb:"assets/item_bomb.png",
   itemSpeed:"assets/item_speed.png",
@@ -132,15 +149,20 @@ canvas.addEventListener("mousedown", e=>{
   else if(e.button===2) pressed["detonate"]=true;   // 右クリック：起爆
 });
 
+// ===== 音量設定（0〜1。BGM・効果音の両方に掛かる全体音量） =====
+let masterVol = 0.6;
+const BGM_BASE = 0.45;   // BGMの基準音量
+
 // ===== 簡易効果音（WebAudio） =====
 let AC=null;
 function actx(){ if(!AC){ try{AC=new (window.AudioContext||window.webkitAudioContext)();}catch(e){} } return AC; }
 function beep(freq,dur,type="square",vol=0.08){
   const a=actx(); if(!a) return;
+  const v=vol*masterVol; if(v<=0) return;   // 全体音量を反映（0なら鳴らさない）
   const o=a.createOscillator(), g=a.createGain();
   o.type=type; o.frequency.value=freq;
-  g.gain.value=vol; o.connect(g); g.connect(a.destination);
-  const t=a.currentTime; o.start(t); g.gain.setValueAtTime(vol,t);
+  g.gain.value=v; o.connect(g); g.connect(a.destination);
+  const t=a.currentTime; o.start(t); g.gain.setValueAtTime(v,t);
   g.gain.exponentialRampToValueAtTime(0.0001,t+dur); o.stop(t+dur);
 }
 function sfxBomb(){ beep(180,0.08,"square",0.06); }
@@ -156,10 +178,247 @@ function sfxItem(){ beep(660,0.08,"square",0.07); beep(990,0.10,"square",0.07); 
 function sfxHit(){ beep(140,0.3,"sawtooth",0.10); }
 function sfxStage(){ beep(523,0.12); setTimeout(()=>beep(659,0.12),120); setTimeout(()=>beep(784,0.18),240); }
 
+// ステージクリアジングル（約0.9秒・ドレミソシド↑）
+function sfxClear(){
+  const a=actx(); if(!a) return;
+  const v=0.13*masterVol; if(v<=0) return;
+  const notes=[
+    [523,0],[659,0.10],[784,0.20],[1047,0.32],[1175,0.44],[1319,0.54],[1568,0.64],[2093,0.74]
+  ];
+  for(const [freq,t] of notes){
+    const o=a.createOscillator(), g=a.createGain();
+    o.type="triangle"; o.frequency.value=freq;
+    g.gain.value=0; o.connect(g); g.connect(a.destination);
+    const at=a.currentTime+t;
+    g.gain.setValueAtTime(0,at);
+    g.gain.linearRampToValueAtTime(v,at+0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001,at+0.18);
+    o.start(at); o.stop(at+0.22);
+  }
+}
+
+// 合間ジングル（break画面用：フワッとした和音をループ）
+let breakJingle=null;
+// （旧startBreakJingleは削除済み。下の新版を使用）
+function stopBreakJingle(){
+  if(!breakJingle) return;
+  clearTimeout(breakJingle.tid);
+  clearInterval(breakJingle.iid);
+  const now=breakJingle.a.currentTime;
+  for(const {o,g} of breakJingle.nodes){
+    try{ g.gain.setValueAtTime(g.gain.value,now);
+    g.gain.linearRampToValueAtTime(0.0001,now+0.3);
+    o.stop(now+0.35); }catch(e){}
+  }
+  breakJingle=null;
+}
+
+// ===== 合間ジングル候補 =====
+// 現在使用中のIDを変えると startBreakJingle() が切り替わる
+let currentJingleId = "a";   // "a"〜"f"
+
+// 低レベルループ再生ヘルパー（メロディ配列 [{freq,dur,vol,type}] を繰り返す）
+function playMelodyLoop(seq, bpm){
+  const a=actx(); if(!a) return null;
+  const beatSec=60/bpm;
+  const nodes=[];
+  let running=true;
+  function playOnce(offsetSec){
+    let t=a.currentTime+offsetSec;
+    for(const n of seq){
+      if(!n.freq){ t+=n.dur*beatSec; continue; }   // 休符
+      const o=a.createOscillator(), g=a.createGain();
+      o.type=n.type||"triangle"; o.frequency.value=n.freq;
+      const v=(n.vol||0.07)*masterVol;
+      g.gain.setValueAtTime(0,t);
+      g.gain.linearRampToValueAtTime(v,t+0.015);
+      g.gain.setValueAtTime(v,t+n.dur*beatSec*0.75);
+      g.gain.linearRampToValueAtTime(0.0001,t+n.dur*beatSec*0.95);
+      o.connect(g); g.connect(a.destination);
+      o.start(t); o.stop(t+n.dur*beatSec);
+      nodes.push({o,g}); t+=n.dur*beatSec;
+    }
+    return t-(a.currentTime+offsetSec);   // 1周の長さ
+  }
+  const loopLen=playOnce(0.05);
+  let elapsed=loopLen;
+  const iid=setInterval(()=>{
+    if(!running) return;
+    playOnce(elapsed-(a.currentTime-(a.currentTime)));
+    elapsed+=loopLen;
+    // ドリフト補正：setIntervalは不正確なので次回までの実残時間を計算
+  }, loopLen*1000-30);
+  // 簡易ループ：一定時間ごとに再スケジュール
+  let nextAt=0.05+loopLen;
+  function schedLoop(){
+    if(!running) return;
+    playOnce(nextAt-(a.currentTime));
+    nextAt+=loopLen;
+    const wait=Math.max(50,(nextAt-a.currentTime)*1000-100);
+    breakJingle&&(breakJingle._lt=setTimeout(schedLoop,wait));
+  }
+  clearInterval(iid);
+  breakJingle={nodes,a,tid:null,iid:null,_lt:null};
+  const wait2=Math.max(50,(loopLen-0.1)*1000);
+  breakJingle._lt=setTimeout(schedLoop,wait2);
+  return breakJingle;
+}
+
+// --- A: 和風ペンタトニック（ほのぼの和風メロディ）---
+function startJingleA(){
+  const seq=[
+    {freq:392,dur:0.5},{freq:440,dur:0.5},{freq:523,dur:0.5},{freq:659,dur:0.5},
+    {freq:784,dur:1.0},{freq:659,dur:0.5},{freq:523,dur:0.5},
+    {freq:440,dur:0.5},{freq:392,dur:0.5},{freq:330,dur:1.0},{freq:null,dur:1.0},
+    {freq:330,dur:0.5},{freq:392,dur:0.5},{freq:440,dur:0.5},{freq:523,dur:0.5},
+    {freq:659,dur:0.5},{freq:523,dur:0.5},{freq:440,dur:0.5},{freq:392,dur:2.0},
+  ];
+  return playMelodyLoop(seq,160);
+}
+// --- B: 跳ねるマーチ風（軽快なリズム）---
+function startJingleB(){
+  const sq=[
+    {freq:523,dur:0.25,type:"square",vol:0.07},{freq:659,dur:0.25,type:"square",vol:0.07},
+    {freq:784,dur:0.5,type:"square",vol:0.09},{freq:659,dur:0.25,type:"square",vol:0.07},
+    {freq:523,dur:0.25,type:"square",vol:0.07},{freq:440,dur:0.5,type:"square",vol:0.08},
+    {freq:null,dur:0.25},{freq:523,dur:0.25,type:"square",vol:0.07},
+    {freq:659,dur:0.25,type:"square",vol:0.07},{freq:784,dur:0.25,type:"square",vol:0.07},
+    {freq:1047,dur:0.5,type:"square",vol:0.1},{freq:784,dur:0.25,type:"square",vol:0.07},
+    {freq:659,dur:0.25,type:"square",vol:0.07},{freq:523,dur:1.0,type:"square",vol:0.09},
+    {freq:null,dur:0.5},
+  ];
+  return playMelodyLoop(sq,200);
+}
+// --- C: 幻想的アルペジオ（ハープ風に流れる）---
+function startJingleC(){
+  const a=actx(); if(!a) return null;
+  const chord1=[261,329,392,523,659,784];
+  const chord2=[293,369,440,587,740,880];
+  const nodes=[];
+  function playArp(freqs,startT,speed,vol){
+    freqs.forEach((f,i)=>{
+      const o=a.createOscillator(), g=a.createGain();
+      o.type="sine"; o.frequency.value=f;
+      const t=startT+i*speed, v=vol*masterVol;
+      g.gain.setValueAtTime(0,t);
+      g.gain.linearRampToValueAtTime(v,t+0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001,t+0.9);
+      o.connect(g); g.connect(a.destination);
+      o.start(t); o.stop(t+1.0); nodes.push({o,g});
+    });
+  }
+  function loop(baseT){
+    playArp(chord1,baseT,0.11,0.055);
+    playArp(chord2,baseT+1.4,0.11,0.055);
+    playArp(chord1.slice().reverse(),baseT+2.8,0.11,0.045);
+    breakJingle&&(breakJingle._lt=setTimeout(()=>{
+      if(breakJingle) loop(a.currentTime+0.05);
+    },3600));
+  }
+  breakJingle={nodes,a,tid:null,iid:null,_lt:null};
+  loop(a.currentTime+0.05);
+  return breakJingle;
+}
+// --- D: チップチューン（ファミコン風レトロ）---
+function startJingleD(){
+  const seq=[
+    {freq:523,dur:0.25,type:"square",vol:0.08},{freq:523,dur:0.25,type:"square",vol:0.08},
+    {freq:659,dur:0.25,type:"square",vol:0.08},{freq:null,dur:0.25},
+    {freq:784,dur:0.25,type:"square",vol:0.09},{freq:784,dur:0.25,type:"square",vol:0.09},
+    {freq:880,dur:0.5,type:"square",vol:0.1},{freq:null,dur:0.25},
+    {freq:784,dur:0.25,type:"square",vol:0.08},{freq:659,dur:0.25,type:"square",vol:0.08},
+    {freq:523,dur:0.25,type:"square",vol:0.08},{freq:392,dur:0.25,type:"square",vol:0.07},
+    {freq:440,dur:0.5,type:"square",vol:0.08},{freq:null,dur:0.5},
+    {freq:330,dur:0.25,type:"square",vol:0.07},{freq:392,dur:0.25,type:"square",vol:0.07},
+    {freq:440,dur:0.25,type:"square",vol:0.08},{freq:523,dur:0.25,type:"square",vol:0.08},
+    {freq:659,dur:1.0,type:"square",vol:0.09},{freq:null,dur:0.5},
+  ];
+  return playMelodyLoop(seq,220);
+}
+// --- E: ワルツ風（3拍子・優雅）---
+function startJingleE(){
+  const seq=[
+    {freq:523,dur:1,vol:0.09},{freq:659,dur:0.5,vol:0.07},{freq:784,dur:0.5,vol:0.07},
+    {freq:880,dur:1,vol:0.09},{freq:784,dur:0.5,vol:0.07},{freq:659,dur:0.5,vol:0.07},
+    {freq:784,dur:1,vol:0.08},{freq:659,dur:0.5,vol:0.06},{freq:523,dur:0.5,vol:0.06},
+    {freq:659,dur:1,vol:0.09},{freq:null,dur:1},
+    {freq:440,dur:1,vol:0.08},{freq:523,dur:0.5,vol:0.06},{freq:659,dur:0.5,vol:0.06},
+    {freq:784,dur:1,vol:0.09},{freq:659,dur:0.5,vol:0.07},{freq:523,dur:0.5,vol:0.07},
+    {freq:523,dur:2,vol:0.1},{freq:null,dur:1},
+  ];
+  return playMelodyLoop(seq,140);
+}
+// --- F: 現行（参考）---
+function startJingleF(){
+  const a=actx(); if(!a) return null;
+  const v=0.06*masterVol; if(v<=0) return null;
+  const freqs=[523,659,784,988];
+  const nodes=[];
+  for(const freq of freqs){
+    const o=a.createOscillator(), g=a.createGain();
+    o.type="sine"; o.frequency.value=freq;
+    g.gain.value=v; o.connect(g); g.connect(a.destination);
+    o.start(); nodes.push({o,g});
+  }
+  function pulse(){
+    if(!breakJingle) return;
+    const now=a.currentTime;
+    for(const {g} of nodes){
+      g.gain.setValueAtTime(v*0.3,now);
+      g.gain.linearRampToValueAtTime(v,now+0.8);
+      g.gain.linearRampToValueAtTime(v*0.3,now+1.6);
+    }
+    breakJingle.tid=setTimeout(pulse,1800);
+  }
+  pulse();
+  breakJingle={nodes,a,tid:null,iid:null,_lt:null};
+  return breakJingle;
+}
+
+const JINGLE_STARTERS={a:startJingleA,b:startJingleB,c:startJingleC,d:startJingleD,e:startJingleE,f:startJingleF};
+
+function startBreakJingle(){
+  stopBreakJingle();
+  const fn=JINGLE_STARTERS[currentJingleId]||startJingleA;
+  fn();
+}
+
+
 // ===== BGM =====
-const bgmNormal = new Audio("normal01.mp3"); bgmNormal.loop=true; bgmNormal.volume=0.45;
-const bgmBoss   = new Audio("boss01.mp3");   bgmBoss.loop=true;   bgmBoss.volume=0.45;
+const bgmNormal = new Audio("normal01.mp3"); bgmNormal.loop=true;
+const bgmBoss   = new Audio("boss01.mp3");   bgmBoss.loop=true;
 let curBgm=null;
+
+// ===== 音量スライダー連携 =====
+function applyVolume(){
+  bgmNormal.volume = BGM_BASE * masterVol;
+  bgmBoss.volume   = BGM_BASE * masterVol;
+}
+(function initVolume(){
+  const slider = document.getElementById("vol");
+  const label  = document.getElementById("volval");
+  // 保存値を復元
+  try{
+    const saved = localStorage.getItem("bomber_vol");
+    if(saved!==null){ const v=parseFloat(saved); if(!isNaN(v)) masterVol=Math.max(0,Math.min(1,v)); }
+  }catch(e){}
+  function refresh(){
+    applyVolume();
+    if(slider) slider.value = Math.round(masterVol*100);
+    if(label)  label.textContent = Math.round(masterVol*100);
+  }
+  if(slider){
+    slider.addEventListener("input", ()=>{
+      masterVol = Math.max(0, Math.min(1, slider.value/100));
+      applyVolume();
+      if(label) label.textContent = Math.round(masterVol*100);
+      try{ localStorage.setItem("bomber_vol", String(masterVol)); }catch(e){}
+    });
+    // 操作後はキー入力をゲームへ戻す（矢印キーがスライダーに取られないように）
+    slider.addEventListener("change", ()=> slider.blur());
+  }
+  refresh();
+})();
 function setBgm(audio){
   if(curBgm===audio){ if(audio && audio.paused) audio.play().catch(()=>{}); return; }
   if(curBgm) curBgm.pause();
@@ -243,9 +502,11 @@ function genStage(stage){
   if(blockCells.length){
     exitCell = blockCells[(Math.random()*blockCells.length)|0];
   }
-  // アイテムを破壊ブロックの下に仕込む（各ステージ最大3個）
+  // アイテムを破壊ブロックの下に仕込む（通常3個＋まれに残機アップ）
   const third = (stage%2===1) ? IT_REMOTE : IT_SPEED;  // 奇数:起爆リモコン / 偶数:スピード
   const types = [IT_FIRE, IT_BOMB, third];
+  // 残機アップ：約1/15（全5ステージ×3周で1回くらい）の確率で追加
+  if(Math.random() < 1/15) types.push(IT_LIFE);
   const pool = blockCells.filter(b => !(exitCell&&b.c===exitCell.c&&b.r===exitCell.r));
   shuffle(pool);
   const itemPlan = [];
@@ -397,6 +658,8 @@ function genBonus(){
   }
   baseEnemySpd=1.1;
   player = carryOver(player);
+  player.maxBombs = Math.max(player.maxBombs, 8);   // ボーナスはたくさん置いて連鎖を楽しめるように
+  player.power    = Math.max(player.power, 3);       // 爆風を伸ばして誘爆を繋ぎやすく
   player.x=TILE*7.5; player.y=TILE*6.5; player.dir="down"; player.alive=true; player.invuln=0;
   buildBackground();   // ゴミブロックは無い状態からスタート
 }
@@ -524,7 +787,10 @@ function pickItem(it){
   if(it.type===IT_FIRE) p.power++;
   else if(it.type===IT_BOMB) p.maxBombs++;
   else if(it.type===IT_SPEED) p.spd=Math.min(3.4,p.spd+0.35);
-  else if(it.type===IT_REMOTE) p.remote=true;
+  else if(it.type===IT_REMOTE){
+    if(p.remote){ game.score += SCORE.remoteBonus; spawnText(it.c,it.r,"+"+SCORE.remoteBonus,"#c9a0ff",true); return; }  // 所持中の重複取得は得点
+    p.remote=true;
+  }
   else if(it.type===IT_LIFE) game.lives++;
   else if(it.type==="sushi"){ game.score += SCORE.sushi; spawnText(it.c,it.r,"+"+SCORE.sushi,"#ffd34d",true); return; }
   spawnText(it.c,it.r,"+", "#ffe66b");
@@ -546,11 +812,13 @@ function placeBomb(p){
   if(bombAt(c,r)) return;
   const active = bombs.filter(b=>b.owner==="p").length;
   if(active>=p.maxBombs) return;
-  const fuse = p.remote ? 600 : 120;   // リモコン時は安全用に長め（Xで任意起爆）
+  // ボーナス中はリモコンを無効化（通常フューズで時間差自動爆発→爆風で隣の爆弾が誘爆して連鎖する）
+  const useRemote = !!p.remote && !game.bonus;
+  const fuse = useRemote ? 600 : 120;   // リモコン時は安全用に長め（Xで任意起爆）
   // ボス戦ではボスのHPが減るほど火力が上がる
   const bossBonus = boss ? Math.floor((boss.maxhp - boss.hp)/2) : 0;
   const power = p.power + bossBonus;
-  bombs.push({c,r,t:fuse,power,owner:"p",passP:true,moving:false,vx:0,vy:0,remote:!!p.remote});
+  bombs.push({c,r,t:fuse,power,owner:"p",passP:true,moving:false,vx:0,vy:0,remote:useRemote});
   sfxBomb();
 }
 
@@ -578,7 +846,8 @@ function updateBombs(dt){
   if(blockWaveCount>0){
     const pts = SCORE.block * blockWaveCount * blockWaveCount;
     game.score += pts;
-    if(blockWaveCount>=2) spawnText(waveCx, waveCy, "+"+pts+" (×"+blockWaveCount+")", "#ffe04d", true);
+    const label = blockWaveCount>=2 ? "+"+pts+" (×"+blockWaveCount+")" : "+"+pts;
+    spawnText(waveCx, waveCy, label, "#ffe04d", blockWaveCount>=2);
   }
   bombs = bombs.filter(b=>!b.done);
 }
@@ -607,15 +876,12 @@ function explode(b, waveSet){
       if(grid[r][c]===BLOCK){ destroyBlock(c,r); break; }
     }
   }
+  const dur = game.bonus ? BONUS_BLAST_DUR : BLAST_DUR;
   for(const cl of cells){
-    blasts.push({c:cl.c,r:cl.r,t:BLAST_DUR});
+    blasts.push({c:cl.c,r:cl.r,t:dur});
     spawnHearts(cl.c*TILE+TILE/2, cl.r*TILE+TILE/2, 5);   // 各マスから小さなハートが飛び散る
   }
-  // 連鎖
-  for(const cl of cells){
-    const ob=bombAt(cl.c,cl.r);
-    if(ob && !ob.done && ob!==b){ ob.t=1; }
-  }
+  // ※誘爆は blastDamage() で「残っている爆風に触れた爆弾」を毎フレーム判定して行う（後から置いた爆弾も誘爆できる）
   // ダメージ判定（即時）
   applyBlast(cells, exitWasOpen);
   // 画面シェイク
@@ -650,7 +916,7 @@ function destroyBlock(c,r){
 function applyBlast(cells, exitWasOpen){
   const set=new Set(cells.map(cl=>cl.c+","+cl.r));
   // 敵（guard中＝出現直後は即死しない）
-  for(const e of enemies){ if(set.has(e.cx+","+e.cy) && e.guard<=0){ e.alive=false; if(game.bonus) game.bonusKills++; game.score += e.fast?SCORE.superNiko:SCORE.niko; spawnSouten(e.x, e.y); } }
+  for(const e of enemies){ if(set.has(e.cx+","+e.cy) && e.guard<=0){ e.alive=false; if(game.bonus) game.bonusKills++; const pts=e.fast?SCORE.superNiko:SCORE.niko; game.score += pts; spawnText(e.cx, e.cy, "+"+pts, e.fast?"#ffdf3a":"#ffe66b", e.fast); spawnSouten(e.x, e.y); } }
   enemies=enemies.filter(e=>e.alive);
   // プレイヤー
   if(player.invuln<=0){
@@ -673,7 +939,7 @@ function applyBlast(cells, exitWasOpen){
     if(occ.some(o=>set.has(o.c+","+o.r))){
       boss.hp--; boss.iframe=45; boss.flash=20; boss.angry=120;
       shake=Math.min(12,shake+6);
-      if(boss.hp<=0){ game.score += SCORE.boss; addStageClearBonus(); enterBonus(); }   // ボス撃破→ボーナスへ
+      if(boss.hp<=0){ game.score += SCORE.boss; addStageClearBonus(); stopBgm(); enterBreak("bonus"); }   // ボス撃破→ボスBGM即停止→合間画像（ボーナスステージ）→ボーナスへ
     }
   }
 }
@@ -692,12 +958,16 @@ function updateBlasts(){
   blasts = blasts.filter(b=>b.t>0);
 }
 
-// 爆風が残っている間、毎フレーム当たり判定（敵・プレイヤー）
+// 爆風が残っている間、毎フレーム当たり判定（敵・プレイヤー・爆弾の誘爆）
 function blastDamage(){
   if(blasts.length===0) return;
   const set=new Set(blasts.map(b=>b.c+","+b.r));
+  // 誘爆：残っている爆風に触れている爆弾は、少し遅れて爆発（後から置いた爆弾も連鎖する）
+  for(const bm of bombs){
+    if(!bm.done && bm.t>CHAIN_DELAY && set.has(bm.c+","+bm.r)) bm.t=CHAIN_DELAY;
+  }
   let killed=false;
-  for(const e of enemies){ if(set.has(e.cx+","+e.cy) && e.guard<=0){ e.alive=false; killed=true; if(game.bonus) game.bonusKills++; game.score += e.fast?SCORE.superNiko:SCORE.niko; spawnSouten(e.x, e.y); } }
+  for(const e of enemies){ if(set.has(e.cx+","+e.cy) && e.guard<=0){ e.alive=false; killed=true; if(game.bonus) game.bonusKills++; const pts=e.fast?SCORE.superNiko:SCORE.niko; game.score += pts; spawnText(e.cx, e.cy, "+"+pts, e.fast?"#ffdf3a":"#ffe66b", e.fast); spawnSouten(e.x, e.y); } }
   if(killed) enemies=enemies.filter(e=>e.alive);
   if(player.alive && player.invuln<=0){
     const pc=cellAt(player.x), pr=cellAt(player.y);
@@ -814,7 +1084,7 @@ function updateEnemies(){
           e.travel=0;
           e.restAt=50+((Math.random()*51)|0);    // 次に休むまで 50〜100 歩（ランダム）
           e.resting=60+((Math.random()*241)|0);  // 休息 1〜5秒（ランダム）
-          e.sitPose=1+((Math.random()*4)|0);     // 座りポーズをランダムに
+          e.sitPose=1+((Math.random()*3)|0);     // 座りポーズをランダムに（3種）
         }
       }
     } else {
@@ -916,7 +1186,7 @@ function spawnDebris(c,r){
   // ブロック破壊時も小さなハートを飛ばす
   spawnHearts(c*TILE+TILE/2, r*TILE+TILE/2, 6);
 }
-const HEART_COLORS=["#ff3b6b","#ff5e86","#ff7aa2","#ffb3cd","#ff9ec4"];
+const HEART_COLORS=["#3bd4ff","#5ce0ff","#7ae8ff","#a8f0ff","#b8e8ff"];   // うりりの水色テーマ
 function spawnHearts(px, py, count){
   for(let i=0;i<count;i++){
     const ang=Math.random()*Math.PI*2;
@@ -929,7 +1199,7 @@ function spawnHearts(px, py, count){
 }
 // 昇天演出：やられたニコおじが半透明でフワーっと少し上に昇る
 function spawnSouten(px, py){
-  particles.push({souten:true, x:px, y:py, vy:-0.55, t:80, t0:80});
+  particles.push({souten:true, x:px, y:py, vy:-0.45, t:120, t0:120});
 }
 // 汗のしずく（つっかえ中に飛ぶ）
 function spawnSweat(px, py){
@@ -952,7 +1222,7 @@ function drawDroplet(x, y, s, alpha){
   ctx.restore();
 }
 function spawnText(c,r,txt,col,big){
-  particles.push({text:txt,x:c*TILE+TILE/2,y:r*TILE+TILE/2,vy:-0.6,t:40,col:col||"#fff",big:!!big});
+  particles.push({text:txt,x:c*TILE+TILE/2,y:r*TILE+TILE/2,vy:-0.4,t:80,col:col||"#fff",big:!!big});
 }
 function updateParticles(){
   for(const p of particles){
@@ -964,14 +1234,29 @@ function updateParticles(){
 }
 
 // ===== フロー =====
+// ===== ハイスコア（自己ベスト・localStorageに保存） =====
+let bestScore = 0;
+try{ const b=localStorage.getItem("bomber_best"); if(b!==null) bestScore=parseInt(b,10)||0; }catch(e){}
+// ゲーム終了時に呼ぶ：自己ベストを更新したら保存し、新記録フラグを立てる
+function recordScore(){
+  if(game.score>bestScore){
+    bestScore=game.score; game.newRecord=true;
+    try{ localStorage.setItem("bomber_best", String(bestScore)); }catch(e){}
+  } else {
+    game.newRecord=false;
+  }
+}
 function startGame(){
   game.stage=1; game.lives=3; player=null; game.bonus=false; game.score=0;
-  game.blocksDestroyed=0; game.secondsLeftTotal=0;
+  game.blocksDestroyed=0; game.secondsLeftTotal=0; game.newRecord=false;
+  game.hudStage=1;   // HUD表示用ステージ番号（次のステージが始まるまで更新しない）
   enterStage();
 }
 function enterStage(){
   if(game.stage>game.maxStage){ enterBoss(); return; }
   game.bonus=false;
+  game.hudStage=game.stage;   // ステージが始まるタイミングでHUD表示を更新
+  stopBreakJingle();           // 合間ジングルを停止してBGMへ切り替え
   genStage(game.stage);
   game.state=ST_READY; game.timer=90; game.bannerT=90;
   game.timeLeft=STAGE_LIMIT;   // 制限時間3分
@@ -987,11 +1272,26 @@ function addStageClearBonus(){
 function nextStage(){
   addStageClearBonus();
   game.stage++;
-  game.state=ST_CLEAR; game.timer=90;
-  sfxStage();
+  game.state=ST_CLEAR; game.timer=120;   // 約2秒（クリアジングルが鳴り終わる時間）
+  stopBgm();       // ステージBGMをここで中断
+  sfxClear();      // クリアジングル（約0.9秒）
+}
+// ステージ間の合間：break画像＋文字を表示してから次へ
+// next: "stage"=通常/ボス（enterStageへ） / "bonus"=ボーナスステージ（enterBonusへ）
+function enterBreak(next){
+  game.state=ST_BREAK;
+  game.timer=240;   // 約4秒で自動的に次へ（Enterで即スキップ可）
+  game.breakNext = next || "stage";
+  // ボス前は合間画像が出た時点でボスBGMを開始（合間ジングルは使わない）
+  if(game.breakNext!=="bonus" && game.stage>game.maxStage){
+    setBgm(bgmBoss);
+  } else {
+    startBreakJingle();   // 通常ステージ間・ボーナス前は合間ジングルを再生
+  }
 }
 function enterBoss(){
   game.bonus=false;
+  stopBreakJingle();   // 念のため（ボス前はbgmBossが上書きするが保険）
   genBoss();
   game.state=ST_BOSSINTRO; game.timer=150;
   game.timeLeft=STAGE_LIMIT;   // ボスも制限時間3分
@@ -1001,14 +1301,16 @@ function enterBoss(){
 function stageTimeUp(){
   game.lives--;
   sfxHit();
-  if(game.lives<=0){ game.state=ST_GAMEOVER; stopBgm(); }
+  if(game.lives<=0){ game.state=ST_GAMEOVER; stopBgm(); recordScore(); }
   else if(boss){ enterBoss(); }   // ボスをやり直し
   else { enterStage(); }          // 通常ステージをやり直し
 }
 // ボス撃破後のボーナスステージ
 function enterBonus(){
   game.bonus=true;
+  stopBreakJingle();   // 合間ジングルを停止してボーナスBGMへ
   genBonus();
+  spawnText(7, 3, "+"+SCORE.boss, "#ff5a5a", true);   // 巨大ニコおじ撃破の得点（genBonusのparticleクリア後にspawnして消えないように）
   game.state=ST_READY; game.timer=90; game.bannerT=90;
   game.timeLeft=BONUS_TIME;       // 30秒
   game.bonusSpawnT=BONUS_SPAWN;
@@ -1018,7 +1320,10 @@ function enterBonus(){
 // ボーナス終了→クリア画像
 function finishGame(){
   game.bonus=false;
+  game.lifeBonus = Math.max(0,game.lives) * SCORE.perLife;   // 残機ボーナス（1機5000P）
+  game.score += game.lifeBonus;
   game.state=ST_WIN; game.timer=0;
+  recordScore();   // 自己ベスト更新
   stopBgm();
   beep(523,0.15);setTimeout(()=>beep(659,0.15),150);setTimeout(()=>beep(784,0.15),300);setTimeout(()=>beep(1046,0.3),450);
 }
@@ -1045,7 +1350,10 @@ function update(){
 
   switch(game.state){
     case ST_TITLE:
-      if(consume("enter")) startGame();
+      if(consume("enter")){ game.state=ST_ITEMINFO; setBgm(bgmNormal); }   // アイテム説明へ＋ステージBGM開始
+      break;
+    case ST_ITEMINFO:
+      if(consume("enter")) startGame();               // 説明を読んだらステージ1開始
       break;
     case ST_READY:
       game.timer--; game.bannerT--;
@@ -1073,13 +1381,21 @@ function update(){
     case ST_CLEAR:
       updateParticles();
       game.timer--;
-      if(game.timer<=0) enterStage();
+      // 通常ステージ間もボス前も、合間画像（○部屋目／巨大ニコおじ登場）を挟む
+      if(game.timer<=0) enterBreak();
+      break;
+    case ST_BREAK:
+      game.timer--;
+      if(consume("enter") || game.timer<=0){               // Enterで即・もしくは数秒で自動
+        if(game.breakNext==="bonus") enterBonus();
+        else enterStage();
+      }
       break;
     case ST_DEAD:
       updateParticles();
       game.timer--;
       if(game.timer<=0){
-        if(game.lives<=0){ game.state=ST_GAMEOVER; stopBgm(); }
+        if(game.lives<=0){ game.state=ST_GAMEOVER; stopBgm(); recordScore(); }
         else { respawn(); }
       }
       break;
@@ -1099,6 +1415,7 @@ function update(){
 
 function respawn(){
   player.alive=true; player.invuln=120;
+  player.remote=false;   // 死亡したら起爆リモコンを失う（再取得で復活）
   player.x=TILE*1.5; player.y=TILE*1.5; player.dir="down";
   // 開始地点を空ける
   for(const cell of [[1,1],[2,1],[1,2]]){ if(grid[cell[1]][cell[0]]===BLOCK) grid[cell[1]][cell[0]]=EMPTY; }
@@ -1121,6 +1438,8 @@ function render(){
   ctx.translate(0,OY);
 
   if(game.state===ST_TITLE){ ctx.restore(); drawTitle(); return; }
+  if(game.state===ST_ITEMINFO){ ctx.restore(); drawItemInfo(); return; }
+  if(game.state===ST_BREAK){ ctx.restore(); drawBreak(); return; }
 
   drawBoard();
   drawItems();
@@ -1139,7 +1458,13 @@ function render(){
   if(game.state===ST_READY||game.state===ST_CLEAR) drawBanner();
   if(game.state===ST_BOSSINTRO) drawBossIntro();
   if(game.state===ST_PAUSE) drawCenter("PAUSE","Pキー / Enter で再開","#fff");
-  if(game.state===ST_GAMEOVER) drawCenter("GAME OVER","Enter でタイトルへ","#ff6b6b");
+  if(game.state===ST_GAMEOVER){
+    drawCenter("GAME OVER","Enter でタイトルへ","#ff6b6b");
+    ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.font="bold 18px sans-serif";
+    ctx.fillStyle = game.newRecord ? "#ffe04d" : "#fff";
+    const go = "SCORE "+game.score.toLocaleString()+(game.newRecord ? "  ★新記録！" : ("   HI "+bestScore.toLocaleString()));
+    ctx.fillText(go, BW/2, (BH+OY)/2+72);
+  }
   if(game.state===ST_WIN) drawWin();
 }
 
@@ -1472,8 +1797,8 @@ function drawBombs(){
     ctx.fillStyle="rgba(0,0,0,.18)";
     ctx.beginPath(); ctx.ellipse(p.x,p.y+15,12,5,0,0,7); ctx.fill();
     // ハート（縁取り＋本体）
-    drawHeart(p.x, p.y, size+5, "#c81e4f");
-    drawHeart(p.x, p.y, size, "#ff4d79");
+    drawHeart(p.x, p.y, size+5, "#1a9ec8");   // 縁取り：濃い水色
+    drawHeart(p.x, p.y, size, "#3dd4f8");    // 本体：うりりの水色
     // ハイライト
     ctx.fillStyle="rgba(255,255,255,.75)";
     ctx.beginPath(); ctx.ellipse(p.x-5,p.y-4,3.2,4.5,-0.5,0,7); ctx.fill();
@@ -1485,8 +1810,12 @@ function drawBlasts(){
     const cx=b.c*TILE+TILE/2, cy=b.r*TILE+TILE/2;
     const a=Math.min(1, b.t/30);
     const prog=1-b.t/BLAST_DUR;          // 0→1 で外へ広がる
+    // ボス爆風はピンク、通常はうりりの水色
+    const hcCenter = b.boss ? "#ff3b6b" : "#3dd4f8";
+    const hcA      = b.boss ? "#ff7aa2" : "#7ae8ff";
+    const hcB      = b.boss ? "#ffb3cd" : "#b8e8ff";
     // 中心の大きめハート
-    drawHeart(cx, cy, 18+6*Math.sin(b.t/3), "#ff3b6b", a);
+    drawHeart(cx, cy, 18+6*Math.sin(b.t/3), hcCenter, a);
     // 周囲に小さなハートを散らす
     const n=6;
     for(let i=0;i<n;i++){
@@ -1495,7 +1824,7 @@ function drawBlasts(){
       const hx=cx+Math.cos(ang)*rad;
       const hy=cy+Math.sin(ang)*rad - prog*8;
       const sz=9+3*Math.sin(b.t/3+i);
-      drawHeart(hx, hy, sz, (i&1)? "#ff7aa2":"#ffb3cd", a);
+      drawHeart(hx, hy, sz, (i&1)? hcA:hcB, a);
     }
   }
 }
@@ -1592,7 +1921,7 @@ function drawBoss(){
 function drawParticles(){
   for(const p of particles){
     if(p.text){
-      ctx.globalAlpha=Math.min(1,p.t/40);
+      ctx.globalAlpha=Math.min(1,p.t/25);   // 最後の約25フレームでフェードアウト（それまでは完全表示）
       ctx.fillStyle=p.col; ctx.font=`bold ${p.big?18:14}px sans-serif`;
       ctx.textAlign="center"; ctx.fillText(p.text,p.x,p.y);
       ctx.globalAlpha=1;
@@ -1629,7 +1958,7 @@ function drawHUD(){
   ctx.fillStyle="#ff7a4d"; ctx.fillText("🔥"+(player?player.power:1),x,OY/2); x+=58;
   ctx.fillStyle="#9bd"; ctx.fillText("💣"+(player?player.maxBombs:1),x,OY/2); x+=58;
   ctx.fillStyle="#7ee"; ctx.fillText("⚡"+(player?player.spd.toFixed(1):"2.0"),x,OY/2); x+=70;
-  if(player&&player.remote){ ctx.fillStyle="#c9a0ff"; ctx.fillText("起爆[X]",x,OY/2); x+=66; }
+  if(player&&player.remote){ ctx.fillStyle="#c9a0ff"; ctx.fillText("起爆",x,OY/2); x+=50; }
 
   // 中央：制限時間
   const tl=Math.max(0, game.timeLeft);
@@ -1638,8 +1967,7 @@ function drawHUD(){
   const low = game.bonus ? tl<=10 : tl<=30;
   ctx.textAlign="center";
   ctx.fillStyle = low ? ((Math.floor(performance.now()/250)&1)?"#ff4d4d":"#ffd34d") : "#ffe6a0";
-  ctx.font="bold 22px sans-serif"; ctx.fillText("⏱ "+tstr, BW/2, OY/2-7);
-  ctx.fillStyle="#bda7e0"; ctx.font="11px sans-serif"; ctx.fillText("のこり時間", BW/2, OY/2+13);
+  ctx.font="bold 22px sans-serif"; ctx.fillText("⏱ "+tstr, BW/2+50, OY/2);   // 起爆[X]表示と重ならないよう少し右へ
 
   // 右側：スコア＋ステージ/敵数（ボーナスは撃破数）
   ctx.textAlign="right";
@@ -1648,11 +1976,13 @@ function drawHUD(){
   ctx.font="bold 13px sans-serif"; ctx.fillStyle="#cfe9f5";
   if(game.bonus) ctx.fillText("★BONUS  撃破"+game.bonusKills, BW-12, OY/2+12);
   else if(boss) ctx.fillText("BOSS戦", BW-12, OY/2+12);
-  else ctx.fillText("STAGE "+game.stage+"/"+game.maxStage+"   ニコおじ"+enemies.length, BW-12, OY/2+12);
+  else ctx.fillText((game.hudStage||game.stage)+"部屋目", BW-12, OY/2+12);
 }
 
 // ===== オーバーレイ描画 =====
 function drawBanner(){
+  // 通常ステージの開始時は、合間画像で「○部屋目」を表示済みなので「STAGE N」バナーは出さない
+  if(game.state===ST_READY && !game.bonus) return;
   const a=Math.min(1,game.timer/30);
   ctx.fillStyle=`rgba(20,12,30,${0.55*a})`; ctx.fillRect(0,0,BW,BH+OY);
   ctx.fillStyle="#fff"; ctx.textAlign="center"; ctx.textBaseline="middle";
@@ -1673,8 +2003,7 @@ function drawBossIntro(){
     const h=180*s, w=IMG.bossFace.width*(h/IMG.bossFace.height);
     ctx.drawImage(IMG.bossFace,BW/2-w/2,(BH+OY)/2-h/2-30,w,h);
   }
-  ctx.fillStyle="#ff5b5b"; ctx.font="bold 38px sans-serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
-  ctx.fillText("⚠ 巨大ニコおじ 出現！",BW/2,(BH+OY)/2+90);
+  // ※「巨大ニコおじ登場」の文字は合間画像（break）側で表示するため、ここでは出さない
 }
 
 function drawCenter(title,sub,col){
@@ -1705,9 +2034,101 @@ function drawWin(){
   ctx.fillStyle="#ffe04d"; ctx.font="bold 16px sans-serif"; ctx.fillText("TOTAL SCORE",CW/2,by+16);
   ctx.fillStyle="#fff"; ctx.font="bold 30px sans-serif"; ctx.fillText(game.score.toLocaleString(),CW/2,by+39);
 
+  // 残機ボーナス（1機5000P）の内訳
+  if(game.lifeBonus>0){
+    ctx.font="bold 16px sans-serif";
+    const lt="残機ボーナス  ×"+Math.max(0,game.lives)+"  +"+game.lifeBonus.toLocaleString()+"P";
+    const ltw=ctx.measureText(lt).width, lbw=ltw+28, lbx=(CW-lbw)/2, lby=by-32, lbh=24;
+    ctx.fillStyle="rgba(20,40,55,0.85)"; roundRect(lbx,lby,lbw,lbh,8); ctx.fill();
+    ctx.fillStyle="#ff9ccb"; ctx.fillText(lt, CW/2, lby+lbh/2);
+  }
+
+  // ハイスコア／新記録
+  ctx.font="bold 18px sans-serif";
+  const rec = game.newRecord ? "★ NEW RECORD! ★" : ("HI-SCORE  "+bestScore.toLocaleString());
+  const rtw=ctx.measureText(rec).width, rbw=rtw+28, rbx=(CW-rbw)/2, rby=by-62, rbh=26;
+  ctx.fillStyle="rgba(20,40,55,0.85)"; roundRect(rbx,rby,rbw,rbh,8); ctx.fill();
+  ctx.fillStyle = game.newRecord ? "#ffe04d" : "#9fe0ff"; ctx.fillText(rec, CW/2, rby+rbh/2);
+
   const blink=(Math.sin(performance.now()/300)+1)/2;
   ctx.fillStyle=`rgba(255,255,255,${0.5+blink*0.5})`; ctx.font="bold 16px sans-serif";
   ctx.fillText("Enter キーでタイトルへ",CW/2,CH-14);
+}
+
+// ステージ間の合間画像（break.png）＋「○部屋目」
+function drawBreak(){
+  const CW=BW, CH=BH+OY;
+  ctx.fillStyle="#000"; ctx.fillRect(0,0,CW,CH);
+  if(IMG.brk && IMG.brk.width){
+    // 画面いっぱいに表示（cover：余白なし・はみ出しは切り取り）
+    const iw=IMG.brk.width, ih=IMG.brk.height;
+    const s=Math.max(CW/iw, CH/ih);
+    const w=iw*s, h=ih*s, x=(CW-w)/2, y=(CH-h)/2;
+    ctx.drawImage(IMG.brk, x, y, w, h);
+  }
+  // 表示文字：ボーナス＝黄／巨大ニコおじ登場＝赤（危険感）／通常＝「○部屋目」
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  let label, col, big;
+  if(game.breakNext==="bonus"){ label="ボーナスステージ"; col="#ffdf3a"; big=false; }      // 黄＝ボーナス感
+  else if(game.stage>game.maxStage){ label="巨大ニコおじ登場"; col="#ff4242"; big=false; }   // 赤＝危険
+  else { label=game.stage+"部屋目"; col="#ffe6a0"; big=true; }
+  ctx.font = big ? "bold 56px sans-serif" : "bold 44px sans-serif";
+  const tw = ctx.measureText(label).width;
+  const bw = tw+56, bx=(CW-bw)/2, by=36, bh=86;
+  ctx.fillStyle="rgba(20,40,55,0.72)"; roundRect(bx,by,bw,bh,16); ctx.fill();
+  ctx.strokeStyle="#7fd3f0"; ctx.lineWidth=3; roundRect(bx,by,bw,bh,16); ctx.stroke();
+  ctx.fillStyle="rgba(0,0,0,0.55)"; ctx.fillText(label, CW/2+3, by+bh/2+3);   // 影
+  ctx.fillStyle=col; ctx.fillText(label, CW/2, by+bh/2);
+  // 案内（点滅）
+  const blink=(Math.sin(performance.now()/300)+1)/2;
+  ctx.fillStyle=`rgba(255,255,255,${0.5+blink*0.5})`; ctx.font="bold 16px sans-serif";
+  ctx.fillText("Enter で次へ", CW/2, CH-22);
+}
+
+// タイトル→ステージ1の間のアイテム説明画面
+function drawItemInfo(){
+  const CW=BW, CH=BH+OY;
+  // 背景（水色）
+  const g=ctx.createLinearGradient(0,0,0,CH);
+  g.addColorStop(0,"#e3f6fd"); g.addColorStop(1,"#9fd6ef");
+  ctx.fillStyle=g; ctx.fillRect(0,0,CW,CH);
+  ctx.textAlign="center"; ctx.textBaseline="middle";
+  // タイトル
+  ctx.fillStyle="#0f5e85"; ctx.font="bold 34px sans-serif";
+  ctx.fillText("アイテムずかん", CW/2, 48);
+  ctx.fillStyle="#2b6f90"; ctx.font="16px sans-serif";
+  ctx.fillText("ブロックを壊すと出てくるよ！", CW/2, 78);
+  // カード一覧（3列×2行）
+  const cards=[
+    ["itemFire","ハートの威力"],
+    ["itemBomb","ハートの個数"],
+    ["itemSpeed","スピードアップ"],
+    ["itemRemote","ハートスイッチ"],
+    ["itemLife","残機アップ"],
+    ["sushi1","点数アップ"],
+  ];
+  const cols=3, rows=2, top=104;
+  const cellW=CW/cols, cellH=(CH-top-50)/rows;
+  const cardH=cellH*0.62;
+  cards.forEach(([key,label],i)=>{
+    const cx=(i%cols)*cellW+cellW/2;
+    const cy=top+Math.floor(i/cols)*cellH+cellH/2;
+    const img=IMG[key];
+    if(img&&img.width){
+      const h=cardH*(key==="sushi1"?0.5:1);   // 寿司は半分くらいの大きさに
+      const w=img.width*(h/img.height);
+      ctx.drawImage(img, cx-w/2, cy-h/2-12, w, h);
+    }
+    // ラベル（白縁取り）
+    ctx.font="bold 20px sans-serif";
+    ctx.lineWidth=4; ctx.strokeStyle="#ffffff";
+    ctx.strokeText(label, cx, cy+cardH/2+6);
+    ctx.fillStyle="#0f5e85"; ctx.fillText(label, cx, cy+cardH/2+6);
+  });
+  // 案内（点滅）
+  const blink=(Math.sin(performance.now()/300)+1)/2;
+  ctx.fillStyle=`rgba(15,94,133,${0.5+blink*0.5})`; ctx.font="bold 18px sans-serif";
+  ctx.fillText("Enter でスタート", CW/2, CH-22);
 }
 
 function drawTitle(){
@@ -1726,6 +2147,16 @@ function drawTitle(){
     ctx.fillStyle="#ffd34d"; ctx.font="bold 48px sans-serif"; ctx.textAlign="center"; ctx.textBaseline="middle";
     ctx.fillText("うりりのお掃除",CW/2,CH/2-20);
     ctx.fillStyle="#fff"; ctx.font="20px sans-serif"; ctx.fillText("クリック / Enter でスタート",CW/2,CH/2+30);
+  }
+  // ハイスコア（自己ベスト）
+  if(bestScore>0){
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.font="bold 18px sans-serif";
+    const hs="🏆 ハイスコア  "+bestScore.toLocaleString();
+    const htw=ctx.measureText(hs).width, hbw=htw+30, hbx=(CW-hbw)/2, hby=CH-58, hbh=28;
+    ctx.fillStyle="rgba(20,40,55,0.78)"; roundRect(hbx,hby,hbw,hbh,9); ctx.fill();
+    ctx.strokeStyle="#7fd3f0"; ctx.lineWidth=2; roundRect(hbx,hby,hbw,hbh,9); ctx.stroke();
+    ctx.fillStyle="#ffe04d"; ctx.fillText(hs, CW/2, hby+hbh/2);
   }
   // 操作ガイド（下部の余白に薄く点滅）
   const blink=(Math.sin(performance.now()/300)+1)/2;

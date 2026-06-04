@@ -1891,13 +1891,24 @@ function drawBlasts(){
 }
 
 function drawTelegraphs(){
+  const blink=(Math.sin(performance.now()/60)+1)/2;
   for(const t of telegraphs){
-    const x=t.c*TILE,y=t.r*TILE;
-    const blink=(Math.sin(performance.now()/60)+1)/2;
+    // 実際の爆発と同じ範囲（中心＋power分・壁/ブロックで停止）を予兆表示する
+    const cells=[{c:t.c,r:t.r}];
+    for(const [dc,dr] of [[1,0],[-1,0],[0,1],[0,-1]]){
+      for(let i=1;i<=t.power;i++){
+        const c=t.c+dc*i, r=t.r+dr*i;
+        if(!inB(c,r)||grid[r][c]===WALL) break;
+        cells.push({c,r}); if(grid[r][c]===BLOCK) break;
+      }
+    }
     ctx.fillStyle=`rgba(255,40,40,${0.15+blink*0.35})`;
-    ctx.fillRect(x+3,y+3,TILE-6,TILE-6);
     ctx.strokeStyle="rgba(255,80,80,.9)"; ctx.lineWidth=2;
-    ctx.strokeRect(x+4,y+4,TILE-8,TILE-8);
+    for(const cl of cells){
+      const x=cl.c*TILE, y=cl.r*TILE;
+      ctx.fillRect(x+3,y+3,TILE-6,TILE-6);
+      ctx.strokeRect(x+4,y+4,TILE-8,TILE-8);
+    }
   }
 }
 

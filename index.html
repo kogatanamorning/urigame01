@@ -1132,6 +1132,12 @@ function updateBoss(){
   if(b.iframe>0) b.iframe--;
   if(b.flash>0) b.flash--;
   if(b.angry>0) b.angry--;
+  // 難易度レベル：経過時間(1分ごと)とボス体力(1/3減るごと)の高い方。最大2
+  // （体力を先に減らせば早く効果発動。時間経過でも下がらない＝max）
+  const elapsed = STAGE_LIMIT - game.timeLeft;
+  const timeLv  = Math.floor(elapsed/60);
+  const hpLv    = Math.floor((b.maxhp - b.hp)*3 / b.maxhp);
+  const bLv = Math.min(2, Math.max(0, timeLv, hpLv));
   // 移動：プレイヤー方向へグリッド単位で寄る
   if(b.moveCd>0) b.moveCd--;
   const centerX=b.cx*TILE+TILE/2, centerY=b.cy*TILE+TILE/2;
@@ -1165,14 +1171,14 @@ function updateBoss(){
     for(let i=0;i<n;i++){
       const c=1+((Math.random()*(COLS-2))|0), r=1+((Math.random()*(ROWS-2))|0);
       if(grid[r][c]===WALL) continue;
-      telegraphs.push({c,r,t:50,power:1});
+      telegraphs.push({c,r,t:50,power:1+bLv});   // 1分/体力1/3ごとに範囲+1マス（最大3マス）
     }
   }
   // 雑魚召喚
   if(b.spawnCd>0) b.spawnCd--;
   else {
-    b.spawnCd=420;
-    if(enemies.length<3){
+    b.spawnCd=(7-bLv)*60;        // 間隔：7秒→1分/体力1/3ごとに-1秒（最短5秒）
+    if(enemies.length < 3+bLv){  // 上限：3体→1分/体力1/3ごとに+1体（最大5体）
       const spots=[{c:1,r:1},{c:COLS-2,r:1},{c:1,r:ROWS-2},{c:COLS-2,r:ROWS-2}];
       const s=spots[(Math.random()*spots.length)|0];
       if(grid[s.r][s.c]!==WALL) enemies.push(makeEnemy(s.c,s.r,1.4));

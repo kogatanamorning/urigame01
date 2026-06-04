@@ -74,7 +74,7 @@ ctx.imageSmoothingEnabled = true;
 const EMPTY = 0, WALL = 1, BLOCK = 2;   // WALL=固定壁, BLOCK=破壊可能
 
 // アイテム種別
-const IT_FIRE = "fire", IT_BOMB = "bomb", IT_SPEED = "speed", IT_REMOTE = "remote", IT_LIFE = "life";
+const IT_FIRE = "fire", IT_BOMB = "bomb", IT_SPEED = "speed", IT_REMOTE = "remote", IT_LIFE = "life", IT_EGG = "egg";
 
 // ゲーム状態
 const ST_TITLE="title", ST_READY="ready", ST_PLAY="play", ST_CLEAR="clear",
@@ -103,6 +103,8 @@ const sources = {
   itemSpeed:"assets/item_speed.png",
   itemRemote:"assets/item_remote.png",
   itemLife:"assets/item_life.png",
+  egg:"assets/egg.png",
+  rideon:"assets/rideon.png",
   sushi1:"assets/sushi1.png",
   sushi2:"assets/sushi2.png",
   sushi3:"assets/sushi3.png",
@@ -471,6 +473,7 @@ function makePlayer(){
     invuln: 0,
     alive: true,
     walkT: 0,
+    riding: false,    // ニコおじに乗っているか（卵で発動）
   };
 }
 
@@ -508,6 +511,8 @@ function genStage(stage){
   const types = [IT_FIRE, IT_BOMB, third];
   // 残機アップ：約1/15（全5ステージ×3周で1回くらい）の確率で追加
   if(Math.random() < 1/15) types.push(IT_LIFE);
+  // 卵：全体で1回だけ・ランダムなステージのランダムなブロックから出現（取得済みなら出さない）
+  if(stage===game.eggStage && !game.eggObtained) types.push(IT_EGG);
   const pool = blockCells.filter(b => !(exitCell&&b.c===exitCell.c&&b.r===exitCell.r));
   shuffle(pool);
   const itemPlan = [];
@@ -566,7 +571,7 @@ let blockWaveCount=0, waveCx=0, waveCy=0;   // 1回の爆破で同時破壊し�
 
 function carryOver(p){
   const np = makePlayer();
-  np.power=p.power; np.maxBombs=p.maxBombs; np.spd=p.spd; np.remote=p.remote;
+  np.power=p.power; np.maxBombs=p.maxBombs; np.spd=p.spd; np.remote=p.remote; np.riding=p.riding;
   return np;
 }
 
@@ -722,9 +727,10 @@ function updatePlayer(dt){
   if(keys.up){dy=-1;p.dir="up";} else if(keys.down){dy=1;p.dir="down";}
   const half=15;
   const moved = (dx||dy);
-  if(dx) tryMovePlayer(p,dx*p.spd,0,half);
-  if(dy) tryMovePlayer(p,0,dy*p.spd,half);
-  if(moved) p.walkT+=p.spd*0.18; else p.walkT=0;
+  const spd = p.spd * (p.riding ? 1.5 : 1);   // ニコおじに乗ると1.5倍速
+  if(dx) tryMovePlayer(p,dx*spd,0,half);
+  if(dy) tryMovePlayer(p,0,dy*spd,half);
+  if(moved) p.walkT+=spd*0.18; else p.walkT=0;
 
   // 爆弾設置
   if(consume("bomb")) placeBomb(p);
@@ -793,6 +799,11 @@ function pickItem(it){
     p.remote=true;
   }
   else if(it.type===IT_LIFE) game.lives++;
+  else if(it.type===IT_EGG){   // ニコおじに乗る（速度1.5倍＋被弾1回耐える）
+    p.riding=true; game.eggObtained=true;
+    spawnText(it.c,it.r,"ニコおじに乗った!","#ffd34d",true);
+    return;
+  }
   else if(it.type==="sushi"){ game.score += SCORE.sushi; spawnText(it.c,it.r,"+"+SCORE.sushi,"#ffd34d",true); return; }
   spawnText(it.c,it.r,"+", "#ffe66b");
 }
@@ -800,6 +811,14 @@ function pickItem(it){
 function hurtPlayer(){
   if(game.bonus) return;          // ボーナス中は無敵
   if(player.invuln>0) return;
+  // ニコおじに乗っていると1回だけ耐える（ニコおじが消失）
+  if(player.riding){
+    player.riding=false;
+    player.invuln=90;             // 振り落とされた後しばらく無敵
+    sfxHit();
+    spawnText(cellAt(player.x), cellAt(player.y), "ニコおじが身代わり!", "#7ad0ff", true);
+    return;
+  }
   sfxHit();
   game.lives--;
   player.alive=false;
@@ -1251,6 +1270,8 @@ function startGame(){
   game.stage=1; game.lives=3; player=null; game.bonus=false; game.score=0;
   game.blocksDestroyed=0; game.secondsLeftTotal=0; game.newRecord=false;
   game.hudStage=1;   // HUD表示用ステージ番号（次のステージが始まるまで更新しない）
+  game.eggStage = 1 + ((Math.random()*game.maxStage)|0);   // 卵が出るステージ（全体で1回・ランダム）
+  game.eggObtained = false;
   enterStage();
 }
 function enterStage(){
@@ -1752,7 +1773,7 @@ function drawFuton(x,y,active){
   ctx.restore();
 }
 
-const ITEM_IMG={fire:"itemFire",bomb:"itemBomb",speed:"itemSpeed",remote:"itemRemote",life:"itemLife"};
+const ITEM_IMG={fire:"itemFire",bomb:"itemBomb",speed:"itemSpeed",remote:"itemRemote",life:"itemLife",egg:"egg"};
 function drawItems(){
   for(const it of items){
     const cx=it.c*TILE+TILE/2, cy=it.r*TILE+TILE/2;
@@ -1768,7 +1789,7 @@ function drawItems(){
       ctx.beginPath(); ctx.ellipse(cx,cy+bob,18,18,0,0,7); ctx.fill();
       ctx.drawImage(img, cx-w/2, cy-h/2+bob, w, h);
     } else {
-      const col={fire:"#ff5a3c",bomb:"#3a8f4e",speed:"#36c5f0",remote:"#f0902a",life:"#ff5d8f",sushi:"#e8a"}[it.type]||"#aaa";
+      const col={fire:"#ff5a3c",bomb:"#3a8f4e",speed:"#36c5f0",remote:"#f0902a",life:"#ff5d8f",egg:"#f0e6b0",sushi:"#e8a"}[it.type]||"#aaa";
       ctx.fillStyle=col; roundRect(cx-13,cy-13+bob,26,26,6); ctx.fill();
     }
   }
@@ -1862,9 +1883,14 @@ function drawPlayer(){
   if(blink) return;
   const bob=Math.abs(Math.sin(p.walkT))*3;
   ctx.save();
-  // 左向きは反転
+  // 左向きは反転（乗っているニコおじごと反転）
   if(p.dir==="left"){ ctx.translate(p.x,0); ctx.scale(-1,1); ctx.translate(-p.x,0); }
-  drawSprite(IMG.player,p.x,p.y+18-bob,58);
+  if(p.riding && IMG.rideon && IMG.rideon.width){
+    drawSprite(IMG.rideon, p.x, p.y+26-bob, 60);     // 乗り物：四つん這いのニコおじ
+    drawSprite(IMG.player, p.x-4, p.y-4-bob, 40);    // うりりはニコおじの背に乗る
+  } else {
+    drawSprite(IMG.player,p.x,p.y+18-bob,58);
+  }
   ctx.restore();
 }
 function drawSpriteAt(img,x,by,h){

@@ -80,7 +80,8 @@ const IT_FIRE = "fire", IT_BOMB = "bomb", IT_SPEED = "speed", IT_REMOTE = "remot
 const ST_TITLE="title", ST_READY="ready", ST_PLAY="play", ST_CLEAR="clear",
       ST_DEAD="dead", ST_GAMEOVER="gameover", ST_BOSSINTRO="bossintro",
       ST_WIN="win", ST_PAUSE="pause", ST_BREAK="break",   // ST_BREAK＝ステージ間の合間画像
-      ST_ITEMINFO="iteminfo";   // タイトル→ステージ1の間のアイテム説明
+      ST_ITEMINFO="iteminfo",   // タイトル→ステージ1の間のアイテム説明
+      ST_BOSSDEAD="bossdead";   // ボス撃破の余韻（爆発しながら消える）
 
 // ===== 画像読み込み =====
 const IMG = {};
@@ -959,7 +960,10 @@ function applyBlast(cells, exitWasOpen){
     if(occ.some(o=>set.has(o.c+","+o.r))){
       boss.hp--; boss.iframe=45; boss.flash=20; boss.angry=120;
       shake=Math.min(12,shake+6);
-      if(boss.hp<=0){ game.score += SCORE.boss; addStageClearBonus(); stopBgm(); enterBreak("bonus"); }   // ボス撃破→ボスBGM即停止→合間画像（ボーナスステージ）→ボーナスへ
+      if(boss.hp<=0 && !boss.dying){   // ボス撃破→爆発しながら消える余韻へ
+        game.score += SCORE.boss; addStageClearBonus(); stopBgm();
+        boss.dying=true; game.state=ST_BOSSDEAD; game.timer=150;   // 約2.5秒の演出
+      }
     }
   }
 }
@@ -1254,17 +1258,26 @@ function updateParticles(){
 }
 
 // ===== フロー =====
-// ===== ハイスコア（自己ベスト・localStorageに保存） =====
-let bestScore = 0;
-try{ const b=localStorage.getItem("bomber_best"); if(b!==null) bestScore=parseInt(b,10)||0; }catch(e){}
-// ゲーム終了時に呼ぶ：自己ベストを更新したら保存し、新記録フラグを立てる
+// ===== スコアランキング（自己ベスト上位5件・localStorageに保存） =====
+const RANK_MAX = 5;
+let scoreRanking = [];
+try{
+  const r=localStorage.getItem("bomber_ranking");
+  if(r){ scoreRanking = JSON.parse(r).filter(n=>typeof n==="number"); }
+  else { const b=localStorage.getItem("bomber_best"); if(b!==null){ const v=parseInt(b,10); if(v) scoreRanking=[v]; } }  // 旧データを引き継ぎ
+}catch(e){}
+scoreRanking.sort((a,b)=>b-a); scoreRanking=scoreRanking.slice(0,RANK_MAX);
+let bestScore = scoreRanking[0] || 0;
+// ゲーム終了時に呼ぶ：今回のスコアをランキングに反映し、順位・新記録を記録
 function recordScore(){
-  if(game.score>bestScore){
-    bestScore=game.score; game.newRecord=true;
-    try{ localStorage.setItem("bomber_best", String(bestScore)); }catch(e){}
-  } else {
-    game.newRecord=false;
-  }
+  const rank = scoreRanking.filter(s=>s>game.score).length;   // 0始まりの順位（同点は今回を上に）
+  game.lastRank = rank < RANK_MAX ? rank : -1;                 // -1 = 圏外
+  game.newRecord = (rank === 0);
+  scoreRanking.push(game.score);
+  scoreRanking.sort((a,b)=>b-a);
+  scoreRanking = scoreRanking.slice(0,RANK_MAX);
+  bestScore = scoreRanking[0] || 0;
+  try{ localStorage.setItem("bomber_ranking", JSON.stringify(scoreRanking)); }catch(e){}
 }
 function startGame(){
   game.stage=1; game.lives=3; player=null; game.bonus=false; game.score=0;
@@ -1424,6 +1437,19 @@ function update(){
     case ST_BOSSINTRO:
       game.timer--;
       if(game.timer<=0) game.state=ST_PLAY;
+      break;
+    case ST_BOSSDEAD:
+      game.timer--;
+      updateParticles();
+      // 巨大ニコおじから爆発（ハート）を連発
+      if(game.timer % 6 === 0 && boss){
+        const bx = boss.x + (Math.random()-0.5)*TILE*2.2;
+        const by = boss.y + (Math.random()-0.5)*TILE*2.6;
+        spawnHearts(bx, by, 9);
+        sfxBoom();
+        shake = Math.min(11, shake+5);
+      }
+      if(game.timer<=0){ boss=null; enterBreak("bonus"); }   // 余韻終了→ボーナスへ
       break;
     case ST_GAMEOVER:
       if(consume("enter")) game.state=ST_TITLE;
@@ -1887,7 +1913,7 @@ function drawPlayer(){
   if(p.dir==="left"){ ctx.translate(p.x,0); ctx.scale(-1,1); ctx.translate(-p.x,0); }
   if(p.riding && IMG.rideon && IMG.rideon.width){
     drawSprite(IMG.rideon, p.x, p.y+26-bob, 60);     // 乗り物：四つん這いのニコおじ
-    drawSprite(IMG.player, p.x-4, p.y-4-bob, 40);    // うりりはニコおじの背に乗る
+    drawSprite(IMG.player, p.x-5, p.y+4-bob, 50);    // うりりはニコおじの背に乗る
   } else {
     drawSprite(IMG.player,p.x,p.y+18-bob,58);
   }
@@ -1928,7 +1954,13 @@ function drawEnemies(){
 function drawBoss(){
   const b=boss;
   ctx.save();
-  if(b.flash>0 && (b.flash>>1&1)){ ctx.globalAlpha=0.6; }
+  if(b.dying){
+    // 撃破演出：後半でじわじわ消える＋小刻みに明滅
+    const t=Math.max(0,game.timer);
+    let a = t>75 ? 1 : t/75;
+    if(Math.floor(performance.now()/55)&1) a*=0.55;   // チカチカ
+    ctx.globalAlpha=Math.max(0,a);
+  } else if(b.flash>0 && (b.flash>>1&1)){ ctx.globalAlpha=0.6; }
   const h=TILE*2.7*(b.angry>0?1.04:1);
   // 影
   ctx.fillStyle="rgba(0,0,0,.3)"; ctx.beginPath();
@@ -1936,6 +1968,7 @@ function drawBoss(){
   drawSprite(IMG.boss,b.x,b.y+TILE*1.0,h);
   if(b.flash>0){ ctx.globalCompositeOperation="source-atop"; }
   ctx.restore();
+  if(b.dying) return;   // 撃破中はHPバーを出さない
   // HPバー
   const bw=BW*0.6, bx=(BW-bw)/2, by=8;
   ctx.fillStyle="rgba(0,0,0,.5)"; roundRect(bx-3,by-3,bw+6,16,6); ctx.fill();
@@ -2053,6 +2086,26 @@ function drawWin(){
     ctx.fillStyle="#ffd34d"; ctx.textAlign="center"; ctx.textBaseline="middle";
     ctx.font="bold 48px sans-serif"; ctx.fillText("CLEAR！おめでとう！",CW/2,CH/2);
   }
+
+  // ===== 上部：マイランキング（自己ベスト上位5件）=====
+  {
+    const rowH=24, rw=300, rh=38+RANK_MAX*rowH, rx=(CW-rw)/2, ry=10;
+    ctx.fillStyle="rgba(15,40,55,0.82)"; roundRect(rx,ry,rw,rh,12); ctx.fill();
+    ctx.strokeStyle="#7fd3f0"; ctx.lineWidth=3; roundRect(rx,ry,rw,rh,12); ctx.stroke();
+    ctx.textAlign="center"; ctx.textBaseline="middle";
+    ctx.fillStyle="#ffe04d"; ctx.font="bold 18px sans-serif";
+    ctx.fillText("🏆 マイランキング", CW/2, ry+20);
+    for(let i=0;i<RANK_MAX;i++){
+      const yy=ry+40+i*rowH;
+      const cur=(i===game.lastRank), sc=scoreRanking[i];
+      ctx.font = cur ? "bold 17px sans-serif" : "15px sans-serif";
+      ctx.fillStyle = cur ? "#ffd34d" : "#cfeefb";
+      if(cur){ ctx.textAlign="left"; ctx.fillText("▶", rx+12, yy); }
+      ctx.textAlign="left";  ctx.fillText((i+1)+".", rx+34, yy);
+      ctx.textAlign="right"; ctx.fillText(sc!=null ? sc.toLocaleString() : "-----", rx+rw-22, yy);
+    }
+  }
+
   // 総スコア表示
   ctx.textAlign="center"; ctx.textBaseline="middle";
   const bw=380, bx=(CW-bw)/2, by=CH-92, bh=56;
@@ -2072,7 +2125,7 @@ function drawWin(){
 
   // ハイスコア／新記録
   ctx.font="bold 18px sans-serif";
-  const rec = game.newRecord ? "★ NEW RECORD! ★" : ("HI-SCORE  "+bestScore.toLocaleString());
+  const rec = game.newRecord ? "★ NEW RECORD! ★" : (game.lastRank>=0 ? ("今回 "+(game.lastRank+1)+"位！") : "ランク外…");
   const rtw=ctx.measureText(rec).width, rbw=rtw+28, rbx=(CW-rbw)/2, rby=by-62, rbh=26;
   ctx.fillStyle="rgba(20,40,55,0.85)"; roundRect(rbx,rby,rbw,rbh,8); ctx.fill();
   ctx.fillStyle = game.newRecord ? "#ffe04d" : "#9fe0ff"; ctx.fillText(rec, CW/2, rby+rbh/2);

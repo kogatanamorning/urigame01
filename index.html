@@ -49,6 +49,7 @@ const COLS = 15, ROWS = 13;
 const BLAST_DUR = 16;          // 爆風の効果時間（フレーム）。ブロックに遮られていた敵が、ブロック破壊後の残り爆風でギリギリ死なない値（最速の敵=1.5px/fでも侵入は約17f後）
 const BONUS_BLAST_DUR = 40;    // ボーナス中の爆風は長め（誘爆に次の爆弾を置く余裕を作る）
 const CHAIN_DELAY = 8;         // 誘爆：爆風に触れた爆弾が爆発するまでの遅延（フレーム）。転がるような連鎖に見せる
+const MOUNT_GAP = 9;           // 後続ニコおじの間隔（軌跡フレーム数）
 const STAGE_LIMIT = 180;       // 各ステージの制限時間（秒）= 3分
 const BONUS_TIME  = 30;        // ボーナスステージの制限時間（秒）
 const BONUS_SPAWN = 0.3;       // ボーナス：ニコおじの湧き間隔（秒）
@@ -474,7 +475,8 @@ function makePlayer(){
     invuln: 0,
     alive: true,
     walkT: 0,
-    riding: false,    // ニコおじに乗っているか（卵で発動）
+    mounts: 0,        // ニコおじに乗っている数（卵で増える／被弾で1つ減る＝残機のような役割）
+    trail: [],        // 後続ニコおじ用：プレイヤーの移動軌跡
   };
 }
 
@@ -512,8 +514,8 @@ function genStage(stage){
   const types = [IT_FIRE, IT_BOMB, third];
   // 残機アップ：約1/15（全5ステージ×3周で1回くらい）の確率で追加
   if(Math.random() < 1/15) types.push(IT_LIFE);
-  // 卵：全体で1回だけ・ランダムなステージのランダムなブロックから出現（取得済みなら出さない）
-  if(stage===game.eggStage && !game.eggObtained) types.push(IT_EGG);
+  // 卵：通常ステージでは約1/10で出現。一度出たらそのゲームの通常ステージにはもう出さない
+  if(!game.eggSpawnedNormal && Math.random() < 0.1){ types.push(IT_EGG); game.eggSpawnedNormal=true; }
   const pool = blockCells.filter(b => !(exitCell&&b.c===exitCell.c&&b.r===exitCell.r));
   shuffle(pool);
   const itemPlan = [];
@@ -572,7 +574,7 @@ let blockWaveCount=0, waveCx=0, waveCy=0;   // 1回の爆破で同時破壊し�
 
 function carryOver(p){
   const np = makePlayer();
-  np.power=p.power; np.maxBombs=p.maxBombs; np.spd=p.spd; np.remote=p.remote; np.riding=p.riding;
+  np.power=p.power; np.maxBombs=p.maxBombs; np.spd=p.spd; np.remote=p.remote; np.mounts=p.mounts||0;
   return np;
 }
 
@@ -631,7 +633,7 @@ function genBoss(){
   // アイテム（最大3個）
   shuffle(blockCells);
   baseEnemySpd = 1.2;
-  const types=[IT_FIRE, IT_BOMB, IT_REMOTE];
+  const types=[IT_FIRE, IT_BOMB, IT_REMOTE, IT_EGG];   // ボス戦は例外として卵も配置
   const ip=[];
   for(let i=0;i<types.length && i<blockCells.length;i++) ip.push({c:blockCells[i].c,r:blockCells[i].r,type:types[i]});
   hiddenItems=ip;
@@ -728,10 +730,16 @@ function updatePlayer(dt){
   if(keys.up){dy=-1;p.dir="up";} else if(keys.down){dy=1;p.dir="down";}
   const half=15;
   const moved = (dx||dy);
-  const spd = p.spd * (p.riding ? 1.5 : 1);   // ニコおじに乗ると1.5倍速
+  const spd = p.spd * (p.mounts>0 ? 1.5 : 1);   // ニコおじに乗ると1.5倍速
   if(dx) tryMovePlayer(p,dx*spd,0,half);
   if(dy) tryMovePlayer(p,0,dy*spd,half);
   if(moved) p.walkT+=spd*0.18; else p.walkT=0;
+  // 後続ニコおじ用：動いたときだけ軌跡を記録（先頭が現在地）
+  if(moved && p.mounts>1){
+    p.trail.unshift({x:p.x,y:p.y,dir:p.dir});
+    const maxLen = p.mounts*MOUNT_GAP + 4;
+    if(p.trail.length>maxLen) p.trail.length=maxLen;
+  }
 
   // 爆弾設置
   if(consume("bomb")) placeBomb(p);
@@ -800,9 +808,9 @@ function pickItem(it){
     p.remote=true;
   }
   else if(it.type===IT_LIFE) game.lives++;
-  else if(it.type===IT_EGG){   // ニコおじに乗る（速度1.5倍＋被弾1回耐える）
-    p.riding=true; game.eggObtained=true;
-    spawnText(it.c,it.r,"ニコおじに乗った!","#ffd34d",true);
+  else if(it.type===IT_EGG){   // ニコおじに乗る（ストック+1：速度1.5倍＋被弾1回ぶんの盾）
+    p.mounts=(p.mounts||0)+1;
+    spawnText(it.c,it.r, p.mounts>1?"ニコおじが増えた!":"ニコおじに乗った!", "#ffd34d", true);
     return;
   }
   else if(it.type==="sushi"){ game.score += SCORE.sushi; spawnText(it.c,it.r,"+"+SCORE.sushi,"#ffd34d",true); return; }
@@ -812,10 +820,10 @@ function pickItem(it){
 function hurtPlayer(){
   if(game.bonus) return;          // ボーナス中は無敵
   if(player.invuln>0) return;
-  // ニコおじに乗っていると1回だけ耐える（ニコおじが消失）
-  if(player.riding){
-    player.riding=false;
-    player.invuln=90;             // 振り落とされた後しばらく無敵
+  // ニコおじに乗っていると、ストックを1つ消費して耐える（残機のような盾）
+  if(player.mounts>0){
+    player.mounts--;
+    player.invuln=90;             // しばらく無敵
     sfxHit();
     spawnText(cellAt(player.x), cellAt(player.y), "ニコおじが身代わり!", "#7ad0ff", true);
     return;
@@ -1283,8 +1291,7 @@ function startGame(){
   game.stage=1; game.lives=3; player=null; game.bonus=false; game.score=0;
   game.blocksDestroyed=0; game.secondsLeftTotal=0; game.newRecord=false;
   game.hudStage=1;   // HUD表示用ステージ番号（次のステージが始まるまで更新しない）
-  game.eggStage = 1 + ((Math.random()*game.maxStage)|0);   // 卵が出るステージ（全体で1回・ランダム）
-  game.eggObtained = false;
+  game.eggSpawnedNormal = false;   // 通常ステージで卵が出たか（1ゲーム1回まで）
   enterStage();
 }
 function enterStage(){
@@ -1908,10 +1915,21 @@ function drawPlayer(){
   const blink = p.invuln>0 && ((p.invuln>>2)&1);
   if(blink) return;
   const bob=Math.abs(Math.sin(p.walkT))*3;
+  // 後続ニコおじ：軌跡(trail)に沿って後ろに付いてくる（遠い順に描画）
+  if(p.mounts>1 && IMG.rideon && IMG.rideon.width){
+    for(let k=p.mounts-1;k>=1;k--){
+      const t = p.trail[Math.min(k*MOUNT_GAP, p.trail.length-1)];
+      if(!t) continue;
+      ctx.save();
+      if(t.dir==="left"){ ctx.translate(t.x,0); ctx.scale(-1,1); ctx.translate(-t.x,0); }
+      drawSprite(IMG.rideon, t.x, t.y+24, 50);
+      ctx.restore();
+    }
+  }
+  // 先頭：乗っているニコおじ＋うりり（左向きは反転）
   ctx.save();
-  // 左向きは反転（乗っているニコおじごと反転）
   if(p.dir==="left"){ ctx.translate(p.x,0); ctx.scale(-1,1); ctx.translate(-p.x,0); }
-  if(p.riding && IMG.rideon && IMG.rideon.width){
+  if(p.mounts>0 && IMG.rideon && IMG.rideon.width){
     drawSprite(IMG.rideon, p.x, p.y+26-bob, 60);     // 乗り物：四つん這いのニコおじ
     drawSprite(IMG.player, p.x-5, p.y+4-bob, 50);    // うりりはニコおじの背に乗る
   } else {
@@ -2087,22 +2105,23 @@ function drawWin(){
     ctx.font="bold 48px sans-serif"; ctx.fillText("CLEAR！おめでとう！",CW/2,CH/2);
   }
 
-  // ===== 上部：マイランキング（自己ベスト上位5件）=====
+  // ===== 上部：マイランキング（横並び・上部の黒帯に収める）=====
   {
-    const rowH=24, rw=300, rh=38+RANK_MAX*rowH, rx=(CW-rw)/2, ry=10;
-    ctx.fillStyle="rgba(15,40,55,0.82)"; roundRect(rx,ry,rw,rh,12); ctx.fill();
-    ctx.strokeStyle="#7fd3f0"; ctx.lineWidth=3; roundRect(rx,ry,rw,rh,12); ctx.stroke();
-    ctx.textAlign="center"; ctx.textBaseline="middle";
-    ctx.fillStyle="#ffe04d"; ctx.font="bold 18px sans-serif";
-    ctx.fillText("🏆 マイランキング", CW/2, ry+20);
+    const bx=8, by=6, bw=CW-16, bh=54;
+    ctx.fillStyle="rgba(15,40,55,0.85)"; roundRect(bx,by,bw,bh,12); ctx.fill();
+    ctx.strokeStyle="#7fd3f0"; ctx.lineWidth=3; roundRect(bx,by,bw,bh,12); ctx.stroke();
+    ctx.textBaseline="middle"; ctx.textAlign="left";
+    ctx.fillStyle="#ffe04d"; ctx.font="bold 15px sans-serif";
+    ctx.fillText("🏆 マイランキング", bx+12, by+bh/2);
+    const startX=bx+148, cellW=(bw-148-8)/RANK_MAX;
     for(let i=0;i<RANK_MAX;i++){
-      const yy=ry+40+i*rowH;
-      const cur=(i===game.lastRank), sc=scoreRanking[i];
-      ctx.font = cur ? "bold 17px sans-serif" : "15px sans-serif";
-      ctx.fillStyle = cur ? "#ffd34d" : "#cfeefb";
-      if(cur){ ctx.textAlign="left"; ctx.fillText("▶", rx+12, yy); }
-      ctx.textAlign="left";  ctx.fillText((i+1)+".", rx+34, yy);
-      ctx.textAlign="right"; ctx.fillText(sc!=null ? sc.toLocaleString() : "-----", rx+rw-22, yy);
+      const cx=startX+cellW*i+cellW/2, cur=(i===game.lastRank), sc=scoreRanking[i];
+      if(cur){ ctx.strokeStyle="#ffd34d"; ctx.lineWidth=2; roundRect(startX+cellW*i+3, by+5, cellW-6, bh-10, 8); ctx.stroke(); }
+      ctx.textAlign="center";
+      ctx.fillStyle = cur ? "#ffd34d" : "#8fc4d8"; ctx.font="bold 12px sans-serif";
+      ctx.fillText((i+1)+"位", cx, by+16);
+      ctx.fillStyle = cur ? "#ffd34d" : "#eaf6fb"; ctx.font = cur ? "bold 16px sans-serif" : "14px sans-serif";
+      ctx.fillText(sc!=null ? sc.toLocaleString() : "----", cx, by+37);
     }
   }
 

@@ -29,14 +29,21 @@
   body.touch #touch{display:flex; width:min(96vw,720px); margin-top:12px;
     justify-content:space-between; align-items:center; gap:8px; touch-action:none;}
   body.touch #hint{display:none;}   /* スマホではキー説明を隠す */
-  .dpad{display:grid; grid-template-columns:repeat(3,54px); grid-template-rows:repeat(3,54px); gap:5px;}
+  /* 円形ジョイスティック（スライドで8方向） */
+  .stick{position:relative; width:154px; height:154px; border-radius:50%;
+    background:rgba(92,192,234,.30); box-shadow:inset 0 0 0 3px rgba(255,255,255,.5), 0 3px 10px rgba(40,130,180,.3);
+    -webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent; touch-action:none; flex:0 0 auto;}
+  .stick::before{content:"✛"; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    color:rgba(255,255,255,.55); font-size:26px;}
+  .knob{position:absolute; left:50%; top:50%; width:66px; height:66px; border-radius:50%;
+    background:rgba(92,192,234,.95); box-shadow:0 3px 8px rgba(40,130,180,.45);
+    transform:translate(-50%,-50%); pointer-events:none;}
   .mid{display:flex; flex-direction:column; gap:10px;}
   .acts{display:flex; flex-direction:column; gap:12px; align-items:center;}
   .tbtn{-webkit-user-select:none; user-select:none; -webkit-tap-highlight-color:transparent;
     border:none; border-radius:14px; background:rgba(92,192,234,.85); color:#fff;
     font-size:22px; font-weight:bold; box-shadow:0 3px 8px rgba(40,130,180,.35);
     display:flex; align-items:center; justify-content:center; touch-action:none;}
-  .dpad .tbtn{width:54px; height:54px;}
   .tbtn:active{background:#2b9fd8; transform:translateY(1px);}
   .tbtn.big{width:84px; height:84px; border-radius:50%; background:rgba(255,120,150,.9); font-size:30px;}
   .tbtn.act{width:74px; height:48px; font-size:18px; background:rgba(201,160,255,.9);}
@@ -58,12 +65,7 @@
 
 <!-- スマホ用タッチ操作（PCでは非表示） -->
 <div id="touch">
-  <div class="dpad">
-    <button class="tbtn" data-hold="up"    style="grid-area:1/2">▲</button>
-    <button class="tbtn" data-hold="left"  style="grid-area:2/1">◀</button>
-    <button class="tbtn" data-hold="right" style="grid-area:2/3">▶</button>
-    <button class="tbtn" data-hold="down"  style="grid-area:3/2">▼</button>
-  </div>
+  <div class="stick" id="stick"><div class="knob" id="knob"></div></div>
   <div class="mid">
     <button class="tbtn small" data-tap="pause">⏸</button>
     <button class="tbtn small" id="btn-reset">⟲</button>
@@ -206,20 +208,36 @@ function unlockAudio(){
   if(audioUnlocked) return; audioUnlocked=true;
   try{ const a=actx(); if(a && a.state==="suspended") a.resume(); }catch(e){}
 }
-// 押しっぱなし系（移動）：keys を立てる
-function bindHold(el, key){
-  const on = e=>{ e.preventDefault(); unlockAudio(); if(!keys[key]) pressed[key]=true; keys[key]=true; };
-  const off= e=>{ e.preventDefault(); keys[key]=false; };
-  el.addEventListener("touchstart", on, {passive:false});
-  el.addEventListener("touchend", off, {passive:false});
-  el.addEventListener("touchcancel", off, {passive:false});
-}
 // 1回押し系（爆弾/起爆/ポーズ/決定）：pressed を立てる
 function bindTap(el, key){
   el.addEventListener("touchstart", e=>{ e.preventDefault(); unlockAudio(); pressed[key]=true; }, {passive:false});
 }
-document.querySelectorAll("[data-hold]").forEach(el=>bindHold(el, el.dataset.hold));
 document.querySelectorAll("[data-tap]").forEach(el=>bindTap(el, el.dataset.tap));
+
+// 円形ジョイスティック：指をスライドさせると進行方向が連続的に変わる（8方向）
+const stickEl=document.getElementById("stick"), knobEl=document.getElementById("knob");
+function clearMove(){ keys.up=keys.down=keys.left=keys.right=false; }
+function stickUpdate(t){
+  const r=stickEl.getBoundingClientRect();
+  const cx=r.left+r.width/2, cy=r.top+r.height/2, maxR=r.width/2;
+  let dx=t.clientX-cx, dy=t.clientY-cy;
+  const dist=Math.hypot(dx,dy), ang=Math.atan2(dy,dx);
+  const kr=Math.min(dist,maxR-12);   // ノブの移動量（円内にクランプ）
+  if(knobEl) knobEl.style.transform=`translate(calc(-50% + ${Math.cos(ang)*kr}px), calc(-50% + ${Math.sin(ang)*kr}px))`;
+  clearMove();
+  if(dist < maxR*0.30) return;        // 中心付近はデッドゾーン（移動しない）
+  // 角度を8方向に量子化（y下向き）。0=右,2=下,4=左,6=上
+  let idx=((Math.round(ang/(Math.PI/4))%8)+8)%8;
+  const map=[["right"],["down","right"],["down"],["down","left"],["left"],["up","left"],["up"],["up","right"]];
+  for(const k of map[idx]) keys[k]=true;
+}
+function stickEnd(){ clearMove(); if(knobEl) knobEl.style.transform="translate(-50%,-50%)"; }
+if(stickEl){
+  stickEl.addEventListener("touchstart", e=>{ e.preventDefault(); unlockAudio(); stickUpdate(e.changedTouches[0]); }, {passive:false});
+  stickEl.addEventListener("touchmove",  e=>{ e.preventDefault(); stickUpdate(e.changedTouches[0]); }, {passive:false});
+  stickEl.addEventListener("touchend",   e=>{ e.preventDefault(); stickEnd(); }, {passive:false});
+  stickEl.addEventListener("touchcancel",e=>{ e.preventDefault(); stickEnd(); }, {passive:false});
+}
 const _rb=document.getElementById("btn-reset");
 if(_rb) _rb.addEventListener("touchstart", e=>{ e.preventDefault(); unlockAudio(); if(game.state!==ST_TITLE) returnToTitle(); }, {passive:false});
 // 盤面タップ：メニュー中は「決定」、プレイ中は爆弾設置

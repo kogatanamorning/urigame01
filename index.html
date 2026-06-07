@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" type="image/png" href="favicon.png">
 <title>うりりのお掃除大作戦</title>
+<!-- リンク共有時のサムネイル（OGP / Twitterカード） -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="うりりのお掃除大作戦">
+<meta property="og:description" content="うりりが爆弾でニコおじを掃除する、ボンバーマン風ブラウザゲーム！スマホでも遊べます。">
+<meta property="og:url" content="https://kogatanamorning.github.io/urigame01/">
+<meta property="og:image" content="https://kogatanamorning.github.io/urigame01/ogp.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="うりりのお掃除大作戦">
+<meta name="twitter:description" content="うりりが爆弾でニコおじを掃除する、ボンバーマン風ブラウザゲーム！スマホでも遊べます。">
+<meta name="twitter:image" content="https://kogatanamorning.github.io/urigame01/ogp.png">
 <style>
   html,body{margin:0;height:100%;
     background:linear-gradient(160deg,#dff4fc 0%,#a7dcf2 55%,#7fc7ec 100%);
@@ -24,6 +36,13 @@
     box-shadow:0 2px 8px rgba(40,130,180,.25);}
   #vol{width:160px;accent-color:#2b9fd8;cursor:pointer;}
   #volval{display:inline-block;width:34px;text-align:right;color:#0f7bb0;}
+  #share{margin-top:10px;display:flex;gap:10px;align-items:center;}
+  .sbtn{border:none;border-radius:20px;padding:8px 16px;font-size:14px;font-weight:bold;
+    color:#fff;cursor:pointer;box-shadow:0 2px 8px rgba(40,130,180,.3);
+    -webkit-tap-highlight-color:transparent;display:inline-flex;align-items:center;gap:6px;}
+  #share-x{background:#111;}
+  #share-copy{background:#2b9fd8;}
+  .sbtn:active{transform:translateY(1px);}
   /* ===== タッチ操作（スマホのみ表示）===== */
   #touch{display:none;}
   body.touch #touch{display:flex; width:min(96vw,720px); margin-top:12px;
@@ -61,6 +80,10 @@
   <span>🔊 音量</span>
   <input id="vol" type="range" min="0" max="100" value="60">
   <span id="volval">60</span>
+</div>
+<div id="share">
+  <button class="sbtn" id="share-x">𝕏 でシェア</button>
+  <button class="sbtn" id="share-copy">🔗 リンクをコピー</button>
 </div>
 
 <!-- スマホ用タッチ操作（PCでは非表示） -->
@@ -516,6 +539,22 @@ function applyVolume(){
     slider.addEventListener("change", ()=> slider.blur());
   }
   refresh();
+})();
+
+// ===== シェアボタン（X / リンクコピー）=====
+(function initShare(){
+  const PAGE_URL="https://kogatanamorning.github.io/urigame01/";
+  const TEXT="うりりのお掃除大作戦で遊ぼう！ #うりりのお掃除大作戦";
+  const xb=document.getElementById("share-x"), cb=document.getElementById("share-copy");
+  if(xb) xb.addEventListener("click", ()=>{
+    const u="https://twitter.com/intent/tweet?text="+encodeURIComponent(TEXT)+"&url="+encodeURIComponent(PAGE_URL);
+    window.open(u, "_blank", "noopener");
+  });
+  if(cb) cb.addEventListener("click", async ()=>{
+    try{ await navigator.clipboard.writeText(PAGE_URL); cb.textContent="✅ コピーしました"; }
+    catch(e){ cb.textContent=PAGE_URL; }
+    setTimeout(()=>{ cb.textContent="🔗 リンクをコピー"; }, 1800);
+  });
 })();
 function setBgm(audio){
   if(curBgm===audio){ if(audio && audio.paused) audio.play().catch(()=>{}); return; }
